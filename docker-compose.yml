@@ -1,0 +1,153 @@
+version: "3.9"
+
+services:
+  # ─────────────────────────────────────────────
+  # API Gateway (FastAPI)
+  # ─────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://shiksha:shiksha@postgres:5432/shiksha
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=shiksha-assets
+    depends_on:
+      - redis
+      - postgres
+      - ollama
+      - minio
+    volumes:
+      - ./api-gateway:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ─────────────────────────────────────────────
+  # Celery Worker (AI Task Queue)
+  # ─────────────────────────────────────────────
+  celery-worker:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://shiksha:shiksha@postgres:5432/shiksha
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=shiksha-assets
+    depends_on:
+      - redis
+      - postgres
+      - ollama
+    volumes:
+      - ./api-gateway:/app
+    command: celery -A celery_app worker --loglevel=info --concurrency=2
+
+  # ─────────────────────────────────────────────
+  # Celery Flower (Queue Monitoring UI)
+  # ─────────────────────────────────────────────
+  flower:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "5555:5555"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    command: celery -A celery_app flower --port=5555
+
+  # ─────────────────────────────────────────────
+  # Redis (Task Queue Broker)
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  # ─────────────────────────────────────────────
+  # PostgreSQL (Metadata Store)
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=shiksha
+      - POSTGRES_USER=shiksha
+      - POSTGRES_PASSWORD=shiksha
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./api-gateway/migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # ─────────────────────────────────────────────
+  # Ollama (Local LLM Inference Server)
+  # ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_MAX_LOADED_MODELS=2
+    # GPU support (comment out if no GPU available)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # ─────────────────────────────────────────────
+  # Ollama Model Puller (runs once on startup)
+  # ─────────────────────────────────────────────
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    entrypoint: >
+      sh -c "
+        sleep 5 &&
+        ollama pull llama3:8b &&
+        ollama pull mistral:7b &&
+        ollama pull nomic-embed-text
+      "
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+
+  # ─────────────────────────────────────────────
+  # MinIO (S3-compatible asset storage)
+  # ─────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+
+volumes:
+  redis_data:
+  postgres_data:
+  ollama_models:
+  minio_data:
